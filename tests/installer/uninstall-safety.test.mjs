@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withIsolatedUninstallHomes } from './isolated-homes.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -60,8 +61,9 @@ function isolatedEnv(root) {
     HOME: home,
     USERPROFILE: home,
     XDG_CONFIG_HOME: path.join(home, '.config'),
-    HERMES_HOME: path.join(home, '.hermes'),
-    OPENCLAW_WORKSPACE: path.join(home, '.openclaw', 'workspace'),
+    // Both tests run the full --uninstall sweep — pin the swept native
+    // integration homes off any real install (see isolated-homes.mjs).
+    ...withIsolatedUninstallHomes({}, home),
     PATH: `${fakeClaudeDir(root)}${sep}${pathWithout(['claude', 'gemini'])}`,
   };
 }

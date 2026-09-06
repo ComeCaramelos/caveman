@@ -24,6 +24,7 @@ const crypto = require('crypto');
 
 const SETTINGS = require('./lib/settings');
 const OPENCLAW = require('./lib/openclaw');
+const DSH = require('./lib/dsh');
 const OWNED = require('./lib/owned-install');
 const { transformOpencodeAgentFrontmatter } = require('./lib/opencode-agent');
 const PORTABLE = require('./lib/portable-process');
@@ -237,6 +238,7 @@ const PROVIDERS = [
   { id: 'gemini',     label: 'Gemini CLI',          mech: 'gemini extensions install',     detect: 'command:gemini' },
   { id: 'opencode',   label: 'opencode',            mech: 'native opencode plugin',        detect: 'command:opencode' },
   { id: 'openclaw',   label: 'OpenClaw',            mech: 'workspace skill + SOUL.md',     detect: 'command:openclaw||dir:$HOME/.openclaw/workspace' },
+  { id: 'dsh',        label: 'DeepSeek Harness',    mech: 'skills + AGENTS.md ruleset',    detect: 'command:dsh||dir:$HOME/.dsh' },
   { id: 'codex',      label: 'Codex CLI',           mech: 'npx skills add (codex)',        detect: 'command:codex',           profile: 'codex' },
 
   // IDE / VS Code-family — extension probes are precise. Cursor/Windsurf also
@@ -1089,6 +1091,38 @@ function installOpenclaw(ctx) {
   process.stdout.write('\n');
 }
 
+// ── DeepSeek Harness native install ────────────────────────────────────────
+// DSH discovers skills from $DSH_HOME/skills (default ~/.dsh/skills/) and
+// loads $DSH_HOME/AGENTS.md as user-global workspace instructions in every
+// session — the always-on seam. Skills are user-invocable in the Web GUI
+// (/caveman injects the ruleset body; a trailing level word is followed by
+// the model). No hooks, badge, or per-session mode state in v1. See
+// bin/lib/dsh.js for the actual file writes.
+function installDsh(ctx) {
+  const { say, note, warn, opts, repoRoot, results } = ctx;
+  results.detected++;
+  say('→ DeepSeek Harness detected');
+
+  const log = {
+    write: (s) => process.stdout.write(s),
+    note: (s) => note(s),
+    warn: (s) => warn(s),
+  };
+
+  const r = DSH.installDsh({
+    dshHome: process.env.DSH_HOME || undefined,
+    repoRoot,
+    dryRun: opts.dryRun,
+    force: opts.force,
+    log,
+  });
+
+  if (r.ok) results.installed.push('dsh');
+  else results.failed.push(['dsh', r.reason || 'install failed']);
+
+  process.stdout.write('\n');
+}
+
 // ── Hooks installer ────────────────────────────────────────────────────────
 // Replaces src/hooks/install.sh + src/hooks/install.ps1.
 async function installHooks(ctx) {
@@ -1531,6 +1565,21 @@ function uninstall(ctx) {
     }
   }
 
+  // DeepSeek Harness native install — strip journaled skills + the fenced
+  // AGENTS.md block. Ownership journal is authority, as with opencode/hermes.
+  try {
+    const dshLog = {
+      write: (s) => process.stdout.write(s),
+      note: (s) => note(s),
+      warn: (s) => warn(s),
+    };
+    const r = DSH.uninstallDsh({ dshHome: process.env.DSH_HOME || undefined, dryRun: opts.dryRun, log: dshLog });
+    if (r.touched) ok('  pruned caveman entries from DeepSeek Harness');
+  } catch (error) {
+    cleanupFailed = true;
+    warn(`  DeepSeek Harness cleanup failed; continuing other cleanup: ${error.message}`);
+  }
+
   // Hermes native install — same journal/digest contract as opencode.
   const hermesRoot = path.join(hermesConfigDir(), 'productivity');
   try {
@@ -1672,8 +1721,9 @@ FLAGS
   --config-dir <path>   Claude Code config dir for hook files + settings.json.
                         Default: \$CLAUDE_CONFIG_DIR or ~/.claude. Does NOT
                         scope \`claude plugin install\`, \`gemini extensions
-                        install\`, opencode (XDG_CONFIG_HOME), or openclaw
-                        (OPENCLAW_WORKSPACE) — those use their own paths.
+                        install\`, opencode (XDG_CONFIG_HOME), openclaw
+                        (OPENCLAW_WORKSPACE), or dsh (DSH_HOME) — those
+                        use their own paths.
   --non-interactive     Never prompt; use defaults. (Auto when stdin is not a TTY.)
   --list                Print provider matrix and exit.
   --no-color            Disable ANSI colors.
@@ -1747,6 +1797,7 @@ async function main() {
     if (prov.id === 'gemini')   { installGemini(ctx); continue; }
     if (prov.id === 'opencode') { installOpencode(ctx); continue; }
     if (prov.id === 'openclaw') { installOpenclaw(ctx); continue; }
+    if (prov.id === 'dsh')      { installDsh(ctx); continue; }
     if (prov.id === 'hermes')   { installHermes(ctx); continue; }
     if (prov.profile)           { installViaSkills(ctx, prov); continue; }
   }

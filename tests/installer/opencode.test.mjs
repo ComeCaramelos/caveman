@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
+import { withIsolatedUninstallHomes } from './isolated-homes.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -43,7 +44,8 @@ function shimOpencode() {
 function runInstaller(args, env) {
   const configDir = path.join(env.XDG_CONFIG_HOME, 'claude-test');
   return spawnSync(process.execPath, [INSTALLER, ...args, '--config-dir', configDir, '--non-interactive', '--no-mcp-shrink'], {
-    env, encoding: 'utf8',
+    env: withIsolatedUninstallHomes(env, env.XDG_CONFIG_HOME),
+    encoding: 'utf8',
   });
 }
 

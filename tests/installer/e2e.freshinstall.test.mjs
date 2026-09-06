@@ -32,6 +32,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { withIsolatedUninstallHomes } from './isolated-homes.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -92,8 +93,9 @@ function isolatedInstallEnv(root) {
     HOME: home,
     USERPROFILE: home,
     XDG_CONFIG_HOME: path.join(home, '.config'),
-    HERMES_HOME: path.join(home, '.hermes'),
-    OPENCLAW_WORKSPACE: path.join(home, '.openclaw', 'workspace'),
+    // The full --uninstall sweeps the native-integration homes — pinned off
+    // any real install via the shared helper (see isolated-homes.mjs).
+    ...withIsolatedUninstallHomes({}, home),
     PATH: `${fakeBin}${sep}${cleanPath}`,
   };
 }
@@ -768,7 +770,9 @@ test('openclaw uninstall removes skill folder + strips SOUL.md block, preserving
   const userContent = '# my workspace\n\nfoo bar baz\n';
   fs.writeFileSync(path.join(ws, 'SOUL.md'), userContent);
   try {
-    const env = { ...process.env, OPENCLAW_WORKSPACE: ws, NO_COLOR: '1' };
+    // This test exercises OpenClaw, so OPENCLAW_WORKSPACE is its real fixture;
+    // the other swept homes (hermes, dsh) stay pinned to absent paths.
+    const env = withIsolatedUninstallHomes({ ...process.env, NO_COLOR: '1' }, dir, { OPENCLAW_WORKSPACE: ws });
     spawnSync(process.execPath, [INSTALLER, '--only', 'openclaw', '--non-interactive', '--no-mcp-shrink', '--config-dir', dir], { env, encoding: 'utf8' });
 
     // Strip claude/gemini from PATH so uninstall doesn't touch real plugins.
@@ -973,6 +977,80 @@ test('openclaw: append on a well-formed block stays a no-op', () => {
     const again = helper.appendBootstrapToSoul(soul, snippet);
     assert.equal(again.changed, false);
     assert.equal(fs.readFileSync(soul, 'utf8'), first, 'no-op append must not modify the file');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── DeepSeek Harness (DSH) ────────────────────────────────────────────────
+// Detection is `command:dsh||dir:$HOME/.dsh`; the isolated HOME plus an
+// existing .dsh dir pins the dir probe. DSH_HOME pins the install target.
+test('dsh install copies the skill subset + writes the AGENTS.md ruleset block', () => {
+  const dir = freshTmpDir();
+  const home = path.join(dir, 'home');
+  const dshHome = path.join(home, '.dsh');
+  fs.mkdirSync(dshHome, { recursive: true });
+  try {
+    const env = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      DSH_HOME: dshHome,
+      PATH: pathWithout(['claude', 'gemini', 'dsh']),
+      NO_COLOR: '1',
+    };
+    const args = ['--only', 'dsh', '--non-interactive', '--no-mcp-shrink', '--config-dir', path.join(dir, 'claude')];
+    const r = spawnSync(process.execPath, [INSTALLER, ...args], { env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `dsh install failed: ${r.stdout}\n${r.stderr}`);
+
+    for (const name of ['caveman', 'caveman-commit', 'caveman-review', 'caveman-help', 'caveman-compress']) {
+      assert.ok(fs.existsSync(path.join(dshHome, 'skills', name, 'SKILL.md')), `skills/${name}/SKILL.md missing`);
+    }
+    const agentsMd = path.join(dshHome, 'AGENTS.md');
+    assert.ok(fs.existsSync(agentsMd), 'AGENTS.md missing');
+    const raw = fs.readFileSync(agentsMd, 'utf8');
+    assert.match(raw, /<!-- caveman-begin -->/, 'begin marker missing');
+    assert.match(raw, /<!-- caveman-end -->/, 'end marker missing');
+    assert.match(raw, /Respond terse like smart caveman/, 'sentinel missing');
+
+    // Idempotent re-run: one marker block, skills intact.
+    const again = spawnSync(process.execPath, [INSTALLER, ...args], { env, encoding: 'utf8' });
+    assert.equal(again.status, 0, again.stderr || again.stdout);
+    const raw2 = fs.readFileSync(agentsMd, 'utf8');
+    assert.equal((raw2.match(/<!-- caveman-begin -->/g) || []).length, 1, 'marker block duplicated on re-run');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('dsh uninstall prunes journaled skills + strips the AGENTS.md block, preserving user content', () => {
+  const dir = freshTmpDir();
+  const home = path.join(dir, 'home');
+  const dshHome = path.join(home, '.dsh');
+  fs.mkdirSync(dshHome, { recursive: true });
+  const userContent = '# my dsh rules\n\nkeep this line\n';
+  fs.writeFileSync(path.join(dshHome, 'AGENTS.md'), userContent);
+  try {
+    const env = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      DSH_HOME: dshHome,
+      PATH: pathWithout(['claude', 'gemini', 'dsh']),
+      NO_COLOR: '1',
+    };
+    spawnSync(process.execPath, [INSTALLER, '--only', 'dsh', '--non-interactive', '--no-mcp-shrink', '--config-dir', path.join(dir, 'claude')], { env, encoding: 'utf8' });
+
+    const r = spawnSync(process.execPath, [INSTALLER, '--uninstall', '--non-interactive', '--no-mcp-shrink', '--config-dir', path.join(dir, 'claude')], { env, encoding: 'utf8' });
+    assert.notEqual(r.status, 2, `uninstall argv error: ${r.stderr}`);
+
+    for (const name of ['caveman', 'caveman-commit', 'caveman-review', 'caveman-help', 'caveman-compress']) {
+      assert.ok(!fs.existsSync(path.join(dshHome, 'skills', name)), `${name} survived uninstall`);
+    }
+    const agentsAfter = fs.readFileSync(path.join(dshHome, 'AGENTS.md'), 'utf8');
+    assert.doesNotMatch(agentsAfter, /<!-- caveman-begin -->/, 'caveman block survived uninstall');
+    assert.match(agentsAfter, /# my dsh rules/, 'user heading wiped during uninstall');
+    assert.match(agentsAfter, /keep this line/, 'user content wiped during uninstall');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
